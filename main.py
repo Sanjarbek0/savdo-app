@@ -1,10 +1,8 @@
+import sqlite3
 import os
 from datetime import datetime, timedelta
 from contextlib import contextmanager
-from urllib.parse import urlparse
 
-import psycopg2
-import psycopg2.extras
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -19,7 +17,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 SECRET_KEY = os.getenv("SECRET_KEY", "savdo-uz-secret-key-2024")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+DB_PATH = os.getenv("DB_PATH", "savdo.db")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer(auto_error=False)
@@ -38,80 +36,77 @@ app.add_middleware(
 # =====================================================
 # DATABASE
 # =====================================================
-def get_conn_params():
-    url = DATABASE_URL
-    if url.startswith("postgres://"):
-        url = url.replace("postgres://", "postgresql://", 1)
-    parsed = urlparse(url)
-    return {
-        "host": parsed.hostname,
-        "port": parsed.port or 5432,
-        "dbname": parsed.path.lstrip("/"),
-        "user": parsed.username,
-        "password": parsed.password,
-    }
+def get_db_path():
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
+    return DB_PATH
 
 
 @contextmanager
 def get_db():
-    conn = psycopg2.connect(**get_conn_params())
-    conn.autocommit = False
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     try:
         yield conn
         conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
     finally:
         conn.close()
 
 
 def init_db():
     with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("""
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                id SERIAL PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 login TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL DEFAULT 'Xodim',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        cur.execute("""
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS categories (
-                id SERIAL PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT UNIQUE NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        cur.execute("""
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
-                id SERIAL PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT NOT NULL,
                 category TEXT NOT NULL,
                 type TEXT NOT NULL CHECK(type IN ('KIRIM', 'CHIQIM')),
                 amount INTEGER NOT NULL CHECK(amount > 0),
                 user_login TEXT NOT NULL,
                 note TEXT DEFAULT '',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
+        # Add note column if not exists (migration for existing DBs)
+        try:
+            conn.execute("ALTER TABLE transactions ADD COLUMN note TEXT DEFAULT ''")
+        except Exception:
+            pass
+
         # Default admin user
-        cur.execute("SELECT id FROM users WHERE login = 'admin'")
-        if not cur.fetchone():
+        existing = conn.execute("SELECT id FROM users WHERE login = 'admin'").fetchone()
+        if not existing:
             hashed = pwd_context.hash("admin123")
-            cur.execute(
-                "INSERT INTO users (login, password_hash, role) VALUES (%s, %s, %s)",
+            conn.execute(
+                "INSERT INTO users (login, password_hash, role) VALUES (?, ?, ?)",
                 ("admin", hashed, "Admin"),
             )
 
         # Default categories
         for cat in ["Marojniy", "Batut", "Popcorn"]:
-            cur.execute("SELECT id FROM categories WHERE name = %s", (cat,))
-            if not cur.fetchone():
-                cur.execute("INSERT INTO categories (name) VALUES (%s)", (cat,))
+            existing = conn.execute("SELECT id FROM categories WHERE name = ?", (cat,)).fetchone()
+            if not existing:
+                conn.execute("INSERT INTO categories (name) VALUES (?)", (cat,))
 
 
 # =====================================================
@@ -174,9 +169,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 @app.post("/api/login")
 def login(req: LoginRequest):
     with get_db() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        cur.execute("SELECT * FROM users WHERE login = %s", (req.login,))
-        user = cur.fetchone()
+        user = conn.execute("SELECT * FROM users WHERE login = ?", (req.login,)).fetchone()
         if not user or not pwd_context.verify(req.password, user["password_hash"]):
             raise HTTPException(status_code=401, detail="Login yoki parol xato!")
         token = create_token(user["login"], user["role"])
@@ -187,28 +180,24 @@ def login(req: LoginRequest):
 @app.get("/api/categories")
 def list_categories(user=Depends(get_current_user)):
     with get_db() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        cur.execute("SELECT * FROM categories ORDER BY id")
-        rows = cur.fetchall()
+        rows = conn.execute("SELECT * FROM categories ORDER BY id").fetchall()
         return [{"id": r["id"], "name": r["name"]} for r in rows]
 
 
 @app.post("/api/categories")
 def add_category(cat: CategoryCreate, user=Depends(get_current_user)):
     with get_db() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        cur.execute("SELECT id FROM categories WHERE name = %s", (cat.name,))
-        if cur.fetchone():
+        existing = conn.execute("SELECT id FROM categories WHERE name = ?", (cat.name,)).fetchone()
+        if existing:
             raise HTTPException(status_code=400, detail="Bunday bo'lim mavjud!")
-        cur.execute("INSERT INTO categories (name) VALUES (%s)", (cat.name,))
+        conn.execute("INSERT INTO categories (name) VALUES (?)", (cat.name,))
         return {"ok": True}
 
 
 @app.delete("/api/categories/{cat_id}")
 def delete_category(cat_id: int, user=Depends(get_current_user)):
     with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM categories WHERE id = %s", (cat_id,))
+        conn.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
         return {"ok": True}
 
 
@@ -216,9 +205,9 @@ def delete_category(cat_id: int, user=Depends(get_current_user)):
 @app.get("/api/transactions")
 def list_transactions(user=Depends(get_current_user)):
     with get_db() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        cur.execute("SELECT * FROM transactions ORDER BY id DESC")
-        rows = cur.fetchall()
+        rows = conn.execute(
+            "SELECT * FROM transactions ORDER BY id DESC"
+        ).fetchall()
         return [
             {
                 "id": r["id"],
@@ -242,9 +231,8 @@ def add_transaction(t: TransactionCreate, user=Depends(get_current_user)):
     if not t.note.strip():
         raise HTTPException(status_code=400, detail="Izoh majburiy!")
     with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO transactions (date, category, type, amount, user_login, note) VALUES (%s, %s, %s, %s, %s, %s)",
+        conn.execute(
+            "INSERT INTO transactions (date, category, type, amount, user_login, note) VALUES (?, ?, ?, ?, ?, ?)",
             (datetime.now().strftime("%Y-%m-%d"), t.category, t.type, t.amount, user["login"], t.note),
         )
         return {"ok": True}
@@ -255,8 +243,7 @@ def delete_transaction(trans_id: int, user=Depends(get_current_user)):
     if user["role"] != "Admin":
         raise HTTPException(status_code=403, detail="Faqat Admin tranzaksiyani o'chira oladi")
     with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM transactions WHERE id = %s", (trans_id,))
+        conn.execute("DELETE FROM transactions WHERE id = ?", (trans_id,))
         return {"ok": True}
 
 
@@ -264,9 +251,7 @@ def delete_transaction(trans_id: int, user=Depends(get_current_user)):
 @app.get("/api/users")
 def list_users(user=Depends(get_current_user)):
     with get_db() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        cur.execute("SELECT id, login, role, created_at FROM users ORDER BY id")
-        rows = cur.fetchall()
+        rows = conn.execute("SELECT id, login, role, created_at FROM users ORDER BY id").fetchall()
         return [{"id": r["id"], "login": r["login"], "role": r["role"]} for r in rows]
 
 
@@ -275,13 +260,12 @@ def add_user(u: UserCreate, user=Depends(get_current_user)):
     if user["role"] != "Admin":
         raise HTTPException(status_code=403, detail="Faqat admin foydalanuvchi qo'sha oladi")
     with get_db() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        cur.execute("SELECT id FROM users WHERE login = %s", (u.login,))
-        if cur.fetchone():
+        existing = conn.execute("SELECT id FROM users WHERE login = ?", (u.login,)).fetchone()
+        if existing:
             raise HTTPException(status_code=400, detail="Bu login band!")
         hashed = pwd_context.hash(u.password)
-        cur.execute(
-            "INSERT INTO users (login, password_hash, role) VALUES (%s, %s, %s)",
+        conn.execute(
+            "INSERT INTO users (login, password_hash, role) VALUES (?, ?, ?)",
             (u.login, hashed, u.role),
         )
         return {"ok": True}
@@ -292,12 +276,10 @@ def delete_user(user_id: int, user=Depends(get_current_user)):
     if user["role"] != "Admin":
         raise HTTPException(status_code=403, detail="Faqat admin o'chira oladi")
     with get_db() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        cur.execute("SELECT login FROM users WHERE id = %s", (user_id,))
-        target = cur.fetchone()
+        target = conn.execute("SELECT login FROM users WHERE id = ?", (user_id,)).fetchone()
         if target and target["login"] == user["login"]:
             raise HTTPException(status_code=400, detail="O'zingizni o'chira olmaysiz!")
-        cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
         return {"ok": True}
 
 
@@ -305,13 +287,11 @@ def delete_user(user_id: int, user=Depends(get_current_user)):
 @app.put("/api/profile/password")
 def update_password(req: PasswordUpdate, user=Depends(get_current_user)):
     with get_db() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        cur.execute("SELECT * FROM users WHERE login = %s", (user["login"],))
-        row = cur.fetchone()
+        row = conn.execute("SELECT * FROM users WHERE login = ?", (user["login"],)).fetchone()
         if not row or not pwd_context.verify(req.old_password, row["password_hash"]):
             raise HTTPException(status_code=400, detail="Eski parol noto'g'ri!")
         hashed = pwd_context.hash(req.new_password)
-        cur.execute("UPDATE users SET password_hash = %s WHERE login = %s", (hashed, user["login"]))
+        conn.execute("UPDATE users SET password_hash = ? WHERE login = ?", (hashed, user["login"]))
         return {"ok": True}
 
 
@@ -319,18 +299,16 @@ def update_password(req: PasswordUpdate, user=Depends(get_current_user)):
 @app.get("/api/dashboard")
 def dashboard_stats(date_from: str = "", date_to: str = "", user=Depends(get_current_user)):
     with get_db() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         query = "SELECT * FROM transactions WHERE 1=1"
         params = []
         if date_from:
-            query += " AND date >= %s"
+            query += " AND date >= ?"
             params.append(date_from)
         if date_to:
-            query += " AND date <= %s"
+            query += " AND date <= ?"
             params.append(date_to)
 
-        cur.execute(query, params)
-        rows = cur.fetchall()
+        rows = conn.execute(query, params).fetchall()
 
         total_in = sum(r["amount"] for r in rows if r["type"] == "KIRIM")
         total_out = sum(r["amount"] for r in rows if r["type"] == "CHIQIM")
