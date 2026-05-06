@@ -38,6 +38,9 @@ app.add_middleware(
 # DATABASE
 # =====================================================
 def get_db_path():
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
     return DB_PATH
 
 

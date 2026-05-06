@@ -5,4 +5,4 @@ services:
     plan: free
     envVars:
       - key: DB_PATH
-        value: /opt/render/project/src/savdo.db
+        value: /app/data/savdo.db
