@@ -1133,6 +1133,10 @@
         <label>Summa (UZS)</label>
         <input type="number" id="tr-amount" placeholder="Masalan: 50000">
     </div>
+    <div class="field">
+        <label>Izoh</label>
+        <input type="text" id="tr-note" placeholder="Izoh kiriting (ixtiyoriy)">
+    </div>
     <div class="modal-actions">
         <button class="btn btn-ghost" onclick="closeModals()">Bekor qilish</button>
         <button class="btn btn-primary" onclick="saveTransaction()"><i class="fa-solid fa-check"></i> Saqlash</button>
@@ -1612,7 +1616,10 @@ function renderRecentTransactions(filtered) {
 
 function formatDate(d) {
     const dt = new Date(d);
-    return dt.toLocaleDateString('uz-UZ', { day: '2-digit', month: 'long', year: 'numeric' });
+    const dd = String(dt.getDate()).padStart(2, '0');
+    const mm = String(dt.getMonth() + 1).padStart(2, '0');
+    const yyyy = dt.getFullYear();
+    return `${dd}.${mm}.${yyyy}`;
 }
 
 // =====================================================
@@ -1635,7 +1642,7 @@ async function renderTransactions() {
             tbody.innerHTML = trans.map(t => `
                 <tr>
                     <td>${formatDate(t.date)}</td>
-                    <td><strong>${t.cat}</strong></td>
+                    <td><strong>${t.cat}</strong>${t.note ? `<div style="font-size:0.8rem; color: var(--text-muted);">${t.note}</div>` : ''}</td>
                     <td><span class="badge badge-${t.type.toLowerCase()}">${t.type === 'KIRIM' ? 'Kirim' : 'Chiqim'}</span></td>
                     <td style="text-align:right;" class="mono">
                         <strong style="color: ${t.type === 'KIRIM' ? 'var(--accent)' : 'var(--danger)'}">
@@ -1675,17 +1682,20 @@ async function saveTransaction() {
         alert("Iltimos, to'g'ri summa kiriting!");
         return;
     }
+    const note = document.getElementById('tr-note').value.trim();
     try {
         await api('/transactions', {
             method: 'POST',
             body: JSON.stringify({
                 category: document.getElementById('tr-cat').value,
                 type: currentTransType,
-                amount: amount
+                amount: amount,
+                note: note
             })
         });
         closeModals();
         document.getElementById('tr-amount').value = '';
+        document.getElementById('tr-note').value = '';
         renderTransactions();
     } catch (e) {
         alert(e.message || "Xatolik yuz berdi!");

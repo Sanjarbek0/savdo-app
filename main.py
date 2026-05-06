@@ -83,9 +83,16 @@ def init_db():
                 type TEXT NOT NULL CHECK(type IN ('KIRIM', 'CHIQIM')),
                 amount INTEGER NOT NULL CHECK(amount > 0),
                 user_login TEXT NOT NULL,
+                note TEXT DEFAULT '',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Add note column if not exists (migration for existing DBs)
+        try:
+            conn.execute("ALTER TABLE transactions ADD COLUMN note TEXT DEFAULT ''")
+        except Exception:
+            pass
 
         # Default admin user
         existing = conn.execute("SELECT id FROM users WHERE login = 'admin'").fetchone()
@@ -119,6 +126,7 @@ class TransactionCreate(BaseModel):
     category: str
     type: str
     amount: int
+    note: str = ""
 
 
 class UserCreate(BaseModel):
@@ -209,6 +217,7 @@ def list_transactions(user=Depends(get_current_user)):
                 "type": r["type"],
                 "amount": r["amount"],
                 "user": r["user_login"],
+                "note": r["note"] or "",
             }
             for r in rows
         ]
@@ -222,8 +231,8 @@ def add_transaction(t: TransactionCreate, user=Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Amount must be positive")
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO transactions (date, category, type, amount, user_login) VALUES (?, ?, ?, ?, ?)",
-            (datetime.now().strftime("%Y-%m-%d"), t.category, t.type, t.amount, user["login"]),
+            "INSERT INTO transactions (date, category, type, amount, user_login, note) VALUES (?, ?, ?, ?, ?, ?)",
+            (datetime.now().strftime("%Y-%m-%d"), t.category, t.type, t.amount, user["login"], t.note),
         )
         return {"ok": True}
 
