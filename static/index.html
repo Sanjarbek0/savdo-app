@@ -845,9 +845,7 @@
         <button class="btn btn-primary" style="width:100%; justify-content:center; padding: 0.85rem;" onclick="handleLogin()">
             Kirish <i class="fa fa-arrow-right"></i>
         </button>
-        <p style="text-align:center; margin-top: 1rem; color: var(--text-soft); font-size: 0.8rem;">
-            Standart: <span class="mono">admin</span> / <span class="mono">admin123</span>
-        </p>
+
     </div>
 </div>
 
@@ -875,7 +873,7 @@
         <div class="nav-label">Boshqaruv</div>
         <ul>
             <li><a href="#" onclick="showPage('categories'); return false;" id="link-categories"><i class="fa-solid fa-tags"></i> Bo'limlar</a></li>
-            <li><a href="#" onclick="showPage('users'); return false;" id="link-users"><i class="fa-solid fa-users"></i> Foydalanuvchilar</a></li>
+            <li id="nav-users"><a href="#" onclick="showPage('users'); return false;" id="link-users"><i class="fa-solid fa-users"></i> Foydalanuvchilar</a></li>
             <li><a href="#" onclick="showPage('profile'); return false;" id="link-profile"><i class="fa-solid fa-user-gear"></i> Profil</a></li>
         </ul>
     </nav>
@@ -1283,8 +1281,13 @@ function showApp() {
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('current-user-name').innerText = currentUser.login;
     document.getElementById('current-user-avatar').innerText = currentUser.login.charAt(0).toUpperCase();
+    document.getElementById('nav-users').style.display = currentUser.role === 'Admin' ? '' : 'none';
     const savedPage = localStorage.getItem(PAGE_KEY) || 'dashboard';
-    showPage(savedPage);
+    if (savedPage === 'users' && currentUser.role !== 'Admin') {
+        showPage('dashboard');
+    } else {
+        showPage(savedPage);
+    }
 }
 
 function logout() {
