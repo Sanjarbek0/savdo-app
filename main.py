@@ -18,7 +18,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 SECRET_KEY = os.getenv("SECRET_KEY", "savdo-uz-secret-key-2024")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
-DB_PATH = os.getenv("DB_PATH", "savdo.db")
+DB_PATH = os.getenv("DB_PATH", "/app/data/savdo.db" if os.path.exists("/app/data") else "savdo.db")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer(auto_error=False)

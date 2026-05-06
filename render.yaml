@@ -3,6 +3,3 @@ services:
     name: savdo-app
     runtime: docker
     plan: free
-    envVars:
-      - key: DB_PATH
-        value: /app/data/savdo.db
