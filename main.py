@@ -230,6 +230,8 @@ def add_transaction(t: TransactionCreate, user=Depends(get_current_user)):
 
 @app.delete("/api/transactions/{trans_id}")
 def delete_transaction(trans_id: int, user=Depends(get_current_user)):
+    if user["role"] != "Admin":
+        raise HTTPException(status_code=403, detail="Faqat Admin tranzaksiyani o'chira oladi")
     with get_db() as conn:
         conn.execute("DELETE FROM transactions WHERE id = ?", (trans_id,))
         return {"ok": True}

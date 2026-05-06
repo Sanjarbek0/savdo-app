@@ -1643,9 +1643,9 @@ async function renderTransactions() {
                         </strong>
                     </td>
                     <td style="text-align:right;">
-                        <button class="btn btn-danger btn-icon" onclick="deleteTrans(${t.id})" title="O'chirish">
+                        ${currentUser.role === 'Admin' ? `<button class="btn btn-danger btn-icon" onclick="deleteTrans(${t.id})" title="O'chirish">
                             <i class="fa fa-trash"></i>
-                        </button>
+                        </button>` : ''}
                     </td>
                 </tr>
             `).join('');
