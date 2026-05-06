@@ -1,12 +1,13 @@
-import sqlite3
 import os
 from datetime import datetime, timedelta
 from contextlib import contextmanager
+from urllib.parse import urlparse
 
+import psycopg2
+import psycopg2.extras
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from jose import jwt, JWTError
 from passlib.context import CryptContext
@@ -18,7 +19,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 SECRET_KEY = os.getenv("SECRET_KEY", "savdo-uz-secret-key-2024")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
-DB_PATH = os.getenv("DB_PATH", "/app/data/savdo.db" if os.path.exists("/app/data") else "savdo.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer(auto_error=False)
@@ -37,77 +38,80 @@ app.add_middleware(
 # =====================================================
 # DATABASE
 # =====================================================
-def get_db_path():
-    db_dir = os.path.dirname(DB_PATH)
-    if db_dir and not os.path.exists(db_dir):
-        os.makedirs(db_dir, exist_ok=True)
-    return DB_PATH
+def get_conn_params():
+    url = DATABASE_URL
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    parsed = urlparse(url)
+    return {
+        "host": parsed.hostname,
+        "port": parsed.port or 5432,
+        "dbname": parsed.path.lstrip("/"),
+        "user": parsed.username,
+        "password": parsed.password,
+    }
 
 
 @contextmanager
 def get_db():
-    conn = sqlite3.connect(get_db_path())
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    conn = psycopg2.connect(**get_conn_params())
+    conn.autocommit = False
     try:
         yield conn
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
 
 def init_db():
     with get_db() as conn:
-        conn.execute("""
+        cur = conn.cursor()
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 login TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL DEFAULT 'Xodim',
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        conn.execute("""
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS categories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 name TEXT UNIQUE NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        conn.execute("""
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 date TEXT NOT NULL,
                 category TEXT NOT NULL,
                 type TEXT NOT NULL CHECK(type IN ('KIRIM', 'CHIQIM')),
                 amount INTEGER NOT NULL CHECK(amount > 0),
                 user_login TEXT NOT NULL,
                 note TEXT DEFAULT '',
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
-        # Add note column if not exists (migration for existing DBs)
-        try:
-            conn.execute("ALTER TABLE transactions ADD COLUMN note TEXT DEFAULT ''")
-        except Exception:
-            pass
-
         # Default admin user
-        existing = conn.execute("SELECT id FROM users WHERE login = 'admin'").fetchone()
-        if not existing:
+        cur.execute("SELECT id FROM users WHERE login = 'admin'")
+        if not cur.fetchone():
             hashed = pwd_context.hash("admin123")
-            conn.execute(
-                "INSERT INTO users (login, password_hash, role) VALUES (?, ?, ?)",
+            cur.execute(
+                "INSERT INTO users (login, password_hash, role) VALUES (%s, %s, %s)",
                 ("admin", hashed, "Admin"),
             )
 
         # Default categories
         for cat in ["Marojniy", "Batut", "Popcorn"]:
-            existing = conn.execute("SELECT id FROM categories WHERE name = ?", (cat,)).fetchone()
-            if not existing:
-                conn.execute("INSERT INTO categories (name) VALUES (?)", (cat,))
+            cur.execute("SELECT id FROM categories WHERE name = %s", (cat,))
+            if not cur.fetchone():
+                cur.execute("INSERT INTO categories (name) VALUES (%s)", (cat,))
 
 
 # =====================================================
@@ -170,7 +174,9 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 @app.post("/api/login")
 def login(req: LoginRequest):
     with get_db() as conn:
-        user = conn.execute("SELECT * FROM users WHERE login = ?", (req.login,)).fetchone()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute("SELECT * FROM users WHERE login = %s", (req.login,))
+        user = cur.fetchone()
         if not user or not pwd_context.verify(req.password, user["password_hash"]):
             raise HTTPException(status_code=401, detail="Login yoki parol xato!")
         token = create_token(user["login"], user["role"])
@@ -181,24 +187,28 @@ def login(req: LoginRequest):
 @app.get("/api/categories")
 def list_categories(user=Depends(get_current_user)):
     with get_db() as conn:
-        rows = conn.execute("SELECT * FROM categories ORDER BY id").fetchall()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute("SELECT * FROM categories ORDER BY id")
+        rows = cur.fetchall()
         return [{"id": r["id"], "name": r["name"]} for r in rows]
 
 
 @app.post("/api/categories")
 def add_category(cat: CategoryCreate, user=Depends(get_current_user)):
     with get_db() as conn:
-        existing = conn.execute("SELECT id FROM categories WHERE name = ?", (cat.name,)).fetchone()
-        if existing:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute("SELECT id FROM categories WHERE name = %s", (cat.name,))
+        if cur.fetchone():
             raise HTTPException(status_code=400, detail="Bunday bo'lim mavjud!")
-        conn.execute("INSERT INTO categories (name) VALUES (?)", (cat.name,))
+        cur.execute("INSERT INTO categories (name) VALUES (%s)", (cat.name,))
         return {"ok": True}
 
 
 @app.delete("/api/categories/{cat_id}")
 def delete_category(cat_id: int, user=Depends(get_current_user)):
     with get_db() as conn:
-        conn.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
+        cur = conn.cursor()
+        cur.execute("DELETE FROM categories WHERE id = %s", (cat_id,))
         return {"ok": True}
 
 
@@ -206,9 +216,9 @@ def delete_category(cat_id: int, user=Depends(get_current_user)):
 @app.get("/api/transactions")
 def list_transactions(user=Depends(get_current_user)):
     with get_db() as conn:
-        rows = conn.execute(
-            "SELECT * FROM transactions ORDER BY id DESC"
-        ).fetchall()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute("SELECT * FROM transactions ORDER BY id DESC")
+        rows = cur.fetchall()
         return [
             {
                 "id": r["id"],
@@ -230,8 +240,9 @@ def add_transaction(t: TransactionCreate, user=Depends(get_current_user)):
     if t.amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be positive")
     with get_db() as conn:
-        conn.execute(
-            "INSERT INTO transactions (date, category, type, amount, user_login, note) VALUES (?, ?, ?, ?, ?, ?)",
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO transactions (date, category, type, amount, user_login, note) VALUES (%s, %s, %s, %s, %s, %s)",
             (datetime.now().strftime("%Y-%m-%d"), t.category, t.type, t.amount, user["login"], t.note),
         )
         return {"ok": True}
@@ -242,7 +253,8 @@ def delete_transaction(trans_id: int, user=Depends(get_current_user)):
     if user["role"] != "Admin":
         raise HTTPException(status_code=403, detail="Faqat Admin tranzaksiyani o'chira oladi")
     with get_db() as conn:
-        conn.execute("DELETE FROM transactions WHERE id = ?", (trans_id,))
+        cur = conn.cursor()
+        cur.execute("DELETE FROM transactions WHERE id = %s", (trans_id,))
         return {"ok": True}
 
 
@@ -250,7 +262,9 @@ def delete_transaction(trans_id: int, user=Depends(get_current_user)):
 @app.get("/api/users")
 def list_users(user=Depends(get_current_user)):
     with get_db() as conn:
-        rows = conn.execute("SELECT id, login, role, created_at FROM users ORDER BY id").fetchall()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute("SELECT id, login, role, created_at FROM users ORDER BY id")
+        rows = cur.fetchall()
         return [{"id": r["id"], "login": r["login"], "role": r["role"]} for r in rows]
 
 
@@ -259,12 +273,13 @@ def add_user(u: UserCreate, user=Depends(get_current_user)):
     if user["role"] != "Admin":
         raise HTTPException(status_code=403, detail="Faqat admin foydalanuvchi qo'sha oladi")
     with get_db() as conn:
-        existing = conn.execute("SELECT id FROM users WHERE login = ?", (u.login,)).fetchone()
-        if existing:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute("SELECT id FROM users WHERE login = %s", (u.login,))
+        if cur.fetchone():
             raise HTTPException(status_code=400, detail="Bu login band!")
         hashed = pwd_context.hash(u.password)
-        conn.execute(
-            "INSERT INTO users (login, password_hash, role) VALUES (?, ?, ?)",
+        cur.execute(
+            "INSERT INTO users (login, password_hash, role) VALUES (%s, %s, %s)",
             (u.login, hashed, u.role),
         )
         return {"ok": True}
@@ -275,10 +290,12 @@ def delete_user(user_id: int, user=Depends(get_current_user)):
     if user["role"] != "Admin":
         raise HTTPException(status_code=403, detail="Faqat admin o'chira oladi")
     with get_db() as conn:
-        target = conn.execute("SELECT login FROM users WHERE id = ?", (user_id,)).fetchone()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute("SELECT login FROM users WHERE id = %s", (user_id,))
+        target = cur.fetchone()
         if target and target["login"] == user["login"]:
             raise HTTPException(status_code=400, detail="O'zingizni o'chira olmaysiz!")
-        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
         return {"ok": True}
 
 
@@ -286,11 +303,13 @@ def delete_user(user_id: int, user=Depends(get_current_user)):
 @app.put("/api/profile/password")
 def update_password(req: PasswordUpdate, user=Depends(get_current_user)):
     with get_db() as conn:
-        row = conn.execute("SELECT * FROM users WHERE login = ?", (user["login"],)).fetchone()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute("SELECT * FROM users WHERE login = %s", (user["login"],))
+        row = cur.fetchone()
         if not row or not pwd_context.verify(req.old_password, row["password_hash"]):
             raise HTTPException(status_code=400, detail="Eski parol noto'g'ri!")
         hashed = pwd_context.hash(req.new_password)
-        conn.execute("UPDATE users SET password_hash = ? WHERE login = ?", (hashed, user["login"]))
+        cur.execute("UPDATE users SET password_hash = %s WHERE login = %s", (hashed, user["login"]))
         return {"ok": True}
 
 
@@ -298,23 +317,24 @@ def update_password(req: PasswordUpdate, user=Depends(get_current_user)):
 @app.get("/api/dashboard")
 def dashboard_stats(date_from: str = "", date_to: str = "", user=Depends(get_current_user)):
     with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         query = "SELECT * FROM transactions WHERE 1=1"
         params = []
         if date_from:
-            query += " AND date >= ?"
+            query += " AND date >= %s"
             params.append(date_from)
         if date_to:
-            query += " AND date <= ?"
+            query += " AND date <= %s"
             params.append(date_to)
 
-        rows = conn.execute(query, params).fetchall()
+        cur.execute(query, params)
+        rows = cur.fetchall()
 
         total_in = sum(r["amount"] for r in rows if r["type"] == "KIRIM")
         total_out = sum(r["amount"] for r in rows if r["type"] == "CHIQIM")
         profit = total_in - total_out
         count = len(rows)
 
-        # Category breakdown
         cat_stats = {}
         for r in rows:
             cat = r["category"]
@@ -325,7 +345,6 @@ def dashboard_stats(date_from: str = "", date_to: str = "", user=Depends(get_cur
             else:
                 cat_stats[cat]["chiqim"] += r["amount"]
 
-        # Daily breakdown for charts
         daily = {}
         for r in rows:
             d = r["date"]

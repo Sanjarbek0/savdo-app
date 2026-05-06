@@ -1,5 +1,16 @@
+databases:
+  - name: savdo-db
+    plan: free
+    databaseName: savdo
+    user: savdo_user
+
 services:
   - type: web
     name: savdo-app
     runtime: docker
     plan: free
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: savdo-db
+          property: connectionString
