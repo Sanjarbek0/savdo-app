@@ -1040,6 +1040,7 @@
                         <tr>
                             <th>Sana</th>
                             <th>Bo'lim</th>
+                            <th>Izoh</th>
                             <th>Turi</th>
                             <th style="text-align:right;">Summa</th>
                             <th style="text-align:right;">Amallar</th>
@@ -1133,7 +1134,7 @@
     </div>
     <div class="field">
         <label>Izoh</label>
-        <input type="text" id="tr-note" placeholder="Izoh kiriting (ixtiyoriy)">
+        <input type="text" id="tr-note" placeholder="Izoh kiriting" required>
     </div>
     <div class="modal-actions">
         <button class="btn btn-ghost" onclick="closeModals()">Bekor qilish</button>
@@ -1645,7 +1646,8 @@ async function renderTransactions() {
             tbody.innerHTML = trans.map(t => `
                 <tr>
                     <td>${formatDate(t.date)}</td>
-                    <td><strong>${t.cat}</strong>${t.note ? `<div style="font-size:0.8rem; color: var(--text-muted);">${t.note}</div>` : ''}</td>
+                    <td><strong>${t.cat}</strong></td>
+                    <td style="color: var(--text-muted); font-size: 0.9rem;">${t.note || ''}</td>
                     <td><span class="badge badge-${t.type.toLowerCase()}">${t.type === 'KIRIM' ? 'Kirim' : 'Chiqim'}</span></td>
                     <td style="text-align:right;" class="mono">
                         <strong style="color: ${t.type === 'KIRIM' ? 'var(--accent)' : 'var(--danger)'}">
@@ -1686,6 +1688,10 @@ async function saveTransaction() {
         return;
     }
     const note = document.getElementById('tr-note').value.trim();
+    if (!note) {
+        alert("Iltimos, izoh kiriting!");
+        return;
+    }
     try {
         await api('/transactions', {
             method: 'POST',

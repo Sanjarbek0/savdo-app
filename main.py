@@ -130,7 +130,7 @@ class TransactionCreate(BaseModel):
     category: str
     type: str
     amount: int
-    note: str = ""
+    note: str
 
 
 class UserCreate(BaseModel):
@@ -239,6 +239,8 @@ def add_transaction(t: TransactionCreate, user=Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Type must be KIRIM or CHIQIM")
     if t.amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be positive")
+    if not t.note.strip():
+        raise HTTPException(status_code=400, detail="Izoh majburiy!")
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
